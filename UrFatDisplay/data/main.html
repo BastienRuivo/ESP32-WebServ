@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Real-Time Weight Chart</title>
+    <style>
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            background-color: #1e1e24;
+            color: #fff;
+            padding: 20px;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: #2a2a35;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+        }
+        .weightLoss {
+            color: #00e676 !important
+        }
+        .weightGain {
+            color:  #ff1744 !important
+        }
+        #measurement {
+            font-size: 1.4rem;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: #aaaaca;
+        }
+        canvas {
+            background: #15151a;
+            border-radius: 6px;
+            width: 100%;
+            height: 300px;
+        }
+        #tooltip {
+            position: absolute;
+            background: rgba(20, 20, 25, 0.9);
+            border: 1px solid #3a3a45;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            text-align: left;
+            pointer-events: none; /* Empêche le tooltip d'interférer avec la souris */
+            opacity: 0;
+            transition: opacity 0.15s ease;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+            z-index: 10;
+        }
+        .tt-title { color: #8a8a95; font-size: 0.75rem; margin-bottom: 4px; }
+        .tt-text { color: #aaaaca; font-weight: bold; }
+        .btn {
+            background-color: #0033ff;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            font-size: 1rem;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .btn:hover {
+            background-color: #0091ea;
+        }
+        .btn:active {
+            transform: scale(0.98);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div style="margin-bottom: 20px;">
+            <button id="sendBtn" class="btn">Capture</button>
+        </div>
+        <div id="measurement">
+            <p><span id="vDate">--:--:--</span></p>
+            <p><span id="vWeight">0.00</span> kg</p>
+            <p>Diff <span id="vDelta">0.00</span> g - Mois <span id="vDeltaMonth">0.00</span> g</p>
+        </div>
+        <canvas id="chart" width="600" height="300"></canvas>
+    </div>
+
+    <script>
+        const ClassNames =
+        {
+            WEIGHT_LOSS : 'weightLoss',
+            WEIGHT_GAIN : 'weightGain'
+        };
+        const canvas = document.getElementById('chart');
+        const ctx = canvas.getContext('2d');
+        const MAX_HISTORY_POINTS = 30; // Number of data points visible on screen at once
+        let dataHistory = []; // Stores objects: { time: string, value: float }
+        let balanceData = null;
+        let dataToPush = null; // here because balance data underlying ref can change between the request is send and it's reponse
+        let historyCount = 0;
+        let globActivePoint = null;
+
+        // Initialize SSE Connection
+        const source = new EventSource('/events');
+
+        function LoadData(data)
+        {
+            return {
+                    date : new Date(data.date),
+                    weight : parseFloat(data.weight),
+                    delta : 0,
+                    x : 0,
+                    y : 0
+                }
+        }
+
+        function LoadHistory(datas, count)
+        {
+            dataHistory = datas.map(element => LoadData(element));
+            historyCount = count;
+            console.log(dataHistory);
+
+            for(let i = 1; i < historyCount; ++i)
+            {
+                dataHistory[i].delta = dataHistory[i].weight - dataHistory[i - 1].weight;
+            }
+
+            DrawLineChart();
+
+            if(historyCount > 0)
+            {
+                const deltaMonth = dataHistory[0].weight - dataHistory[historyCount - 1].weight;
+                const color = Math.abs(deltaMonth) >= 1e-1 ? (deltaMonth > 0.0 ? ClassNames.WEIGHT_GAIN : ClassNames.WEIGHT_LOSS) : '';
+                SetValue('vDeltaMonth', Math.round(deltaMonth * 10) * 100, color);
+            }
+        }
+
+        function GetDateStringPrecise(date)
+        {
+            return date.getUTCDate() + "-" + (date.getUTCMonth() + 1) + "-" + date.getUTCFullYear() + ":" + date.getUTCHours() + "h" + date.getUTCMinutes() + "m" + date.getUTCSeconds() + "s";
+        }
+
+        function GetDateStringDay(date)
+        {
+            let year = date.getUTCFullYear();
+            return date.getUTCDate() + "-" + (date.getUTCMonth() + 1) + "-" + String(year - 2000);
+        }
+
+        function SetValue(id, value, colorClass)
+        {
+            let valueDoc = document.getElementById(id);
+            valueDoc.textContent = value;
+            valueDoc.classList.remove(ClassNames.WEIGHT_LOSS, ClassNames.WEIGHT_GAIN);
+            if(colorClass != '') valueDoc.classList.add(colorClass);
+        }
+
+        function ShowBalanceData(data, lastHistory) {
+            if(lastHistory != null)
+            {
+                const delta = data.weight - lastHistory.weight;
+                data.delta = delta;
+                const color = Math.abs(delta) >= 1e-1 ? (delta > 0.0 ? ClassNames.WEIGHT_GAIN : ClassNames.WEIGHT_LOSS) : '';
+                SetValue('vDelta', Math.round(delta * 10) * 100, color);
+            }
+
+            SetValue('vDate', GetDateStringPrecise(data.date), 0);
+            SetValue('vWeight', data.weight.toFixed(1), 0);
+
+            balanceData = data;
+        }
+
+        function DrawLineChart() {
+            // Clear canvas canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (dataHistory.length === 0) return;
+
+            const padding = 40;
+            const chartWidth = canvas.width - padding * 2;
+            const chartHeight = canvas.height - padding * 2;
+
+            // Find dynamic min/max bounds for proper scaling
+            let values = dataHistory.map(d => d.weight);
+            let maxVal = Math.max(...values, 90) + 5;
+            let minVal = Math.min(...values, 0) - 5;
+            if (minVal < 0) minVal = 0; 
+
+            const valRange = maxVal - minVal;
+
+            // Draw Background Grid Lines
+            ctx.strokeStyle = '#3a3a45';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                let y = padding + (chartHeight / 4) * i;
+                ctx.beginPath();
+                ctx.moveTo(padding, y);
+                ctx.lineTo(canvas.width - padding, y);
+                ctx.stroke();
+                
+                // Draw Y-axis labels (kg value)
+                ctx.fillStyle = '#8a8a95';
+                ctx.font = '10px Arial';
+                let lbl = (maxVal - (valRange / 4) * i).toFixed(1) + "kg";
+                ctx.fillText(lbl, 5, y + 3);
+            }
+
+            // Draw Chart Line Path
+            ctx.beginPath();
+            ctx.strokeStyle = '#00b0ff'; // Cyan line color
+            ctx.lineWidth = 3;
+            ctx.lineJoin = 'round';
+
+            for (let i = 0; i < dataHistory.length; i++) {
+                // Calculate coordinate placements linearly
+                let x = padding + (i / (MAX_HISTORY_POINTS - 1)) * chartWidth;
+                let y = padding + chartHeight - ((dataHistory[i].weight - minVal) / valRange) * chartHeight;
+
+                dataHistory[i].x = x;
+                dataHistory[i].y = y;
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            let date;
+
+            for (let i = 0; i < dataHistory.length; i++) {
+
+                let x = padding + (i / (MAX_HISTORY_POINTS - 1)) * chartWidth;
+                let y = padding + chartHeight - ((dataHistory[i].weight - minVal) / valRange) * chartHeight;
+
+                ctx.beginPath();
+                let radius = 4;
+                if(globActivePoint != null && globActivePoint.x == x)
+                {
+                    radius = 8;
+                }
+                ctx.fillStyle = '#ff1744';
+                ctx.arc(x, y, radius, 0, 2 * Math.PI);
+                ctx.fill();
+
+                if (i === 0) {
+                    date = dataHistory[i].date;
+                    ctx.fillStyle = '#8a8a95';
+                    ctx.font = '10px Arial';
+                    ctx.save();
+                    ctx.translate(x, canvas.height - 15);
+                    ctx.fillText(GetDateStringDay(dataHistory[i].date), -20, 0);
+                    ctx.restore();
+                }
+            }
+        }
+
+        canvas.addEventListener('mousemove', function(evt) {
+            const rect = canvas.getBoundingClientRect();
+
+            const mouseX = (evt.clientX - rect.left) * (canvas.width / rect.width);
+            const mouseY = (evt.clientY - rect.top) * (canvas.height / rect.height);
+
+            let activePoint = null;
+
+            for (let i = 0; i < dataHistory.length; i++) {
+                const p = dataHistory[i];
+                const distance = Math.pow(mouseX - p.x, 2);
+                if (distance < 100) { // note it's squared distance here
+                    activePoint = p;
+                    break;
+                }
+            }
+
+            if(activePoint != null)
+            {
+                console.log(`p.x = ${activePoint.x}, p.y = ${activePoint.y}, value = ${activePoint.weight}, delta = ${activePoint.delta}`);
+                tooltip.innerHTML = `
+                    <div class="tt-title">Date : ${GetDateStringPrecise(activePoint.date)}</div>
+                    <div>Poids : ${activePoint.weight.toFixed(2)} kg</div>
+                    <div>Delta : ${Math.round(activePoint.delta * 10) * 100} g</div>
+                `;
+
+                if(activePoint != globActivePoint)
+                {
+                    globActivePoint = activePoint;
+                    DrawLineChart();
+                }
+
+                tooltip.style.left = (evt.pageX + 5) + 'px';
+                tooltip.style.top = (evt.pageY) + 'px';
+                tooltip.style.opacity = '1';
+            } else {
+                tooltip.style.opacity = '0';
+            }
+        });
+
+        canvas.addEventListener('mouseleave', function() {
+            tooltip.style.opacity = '0';
+            globActivePoint = null;
+            DrawLineChart();
+        });
+        
+        window.addEventListener('DOMContentLoaded', () => {
+            fetch('/history')
+                .then(response => {
+                    if (!response.ok) throw new Error("Can't retrieve history");
+                    return response.json();
+                })
+                .then(json => {
+                    console.log(`Found history: ${json.count}`);
+                    if (json.data && json.data.length > 0) {
+                        LoadHistory(json.data, json.count);
+                    }
+                    
+                    ListenUpdate();
+                })
+                .catch(err => {
+                    console.error(err);
+                    ListenUpdate();
+                });
+        });
+
+        function ListenUpdate() {
+            console.log("Subscribing to addPoint...");
+            const source = new EventSource('/events');
+            source.addEventListener('sensor-addPoint', function(e) {
+                try {
+                    const payload = JSON.parse(e.data);
+                    const data = LoadData(payload);
+
+                    let lastData = null;
+                    if(historyCount > 0)
+                    {
+                        lastData = dataHistory[historyCount - 1];
+                    } 
+                    ShowBalanceData(data, lastData);
+                } catch (err) {
+                    console.error("Failed to parse incoming stream data payload:", err);
+                }
+            }, false);
+        }
+
+        document.getElementById('sendBtn').addEventListener('click', function() {
+            console.log("Sending data...");
+            if(balanceData == null) return;
+            const button = this;
+            button.disabled = true;
+            button.textContent = "Sending...";
+
+            dataToPush = { 
+                ...balanceData, 
+                date: new Date() 
+            };
+
+            // 3. Envoi de la requête HTTP POST avec fetch
+            fetch('/submit-data', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                // On reconstruit l'objet JSON attendu par le serveur
+                body: JSON.stringify({
+                    date: Date.now(),
+                    weight: dataToPush.weight
+                })
+            })
+            .then(response => {
+                if (response.ok) {
+                    console.log("Successfully sent data");
+                    dataHistory.push({...dataToPush});
+                    historyCount++;
+                    dataToPush = null;
+                    if(historyCount >= MAX_HISTORY_POINTS)
+                    {
+                        dataHistory.shift();
+                    }
+                    DrawLineChart();
+                } else {
+                    throw new Error("Server error (error " + response.status + ")");
+                }
+            })
+            .catch(err => {
+                console.error("Can't send data :", err);
+            })
+            .finally(final => {
+                const button = this;
+                button.disabled = false;
+                button.textContent = "Capture";
+            });
+        });
+
+    </script>
+
+
+    <div id="tooltip"></div>
+</body>
+</html>
