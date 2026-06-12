@@ -1,10 +1,11 @@
 #pragma once
 
 #include <ArduinoJson.h>
+#include <cstdint>
 
 struct WeightData
 {
-    unsigned long date;
+    uint64_t date;
     float weight;
 
     static void Jsonify(const WeightData& data, JsonObject& json)

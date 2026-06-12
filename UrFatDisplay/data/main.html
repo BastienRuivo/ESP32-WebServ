@@ -6,20 +6,41 @@
     <title>ESP32 Real-Time Weight Chart</title>
     <style>
         
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #1e1e24;
+            overflow-x: hidden; /* Avoid horizontal scrollbar bugs */
+        }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             text-align: center;
-            background-color: #1e1e24;
             color: #fff;
-            padding: 20px;
+            
+            /* 2. Flexbox forces the container to fill the structural body boundaries */
+            display: flex;
+            justify-content: center;
+            align-items: center;
         }
         .container {
-            max-width: 700px;
-            margin: 0 auto;
+            width: 100%;
+            max-width: 100%; /* Override your previous 700px limit */
+            min-height: 100vh; /* Stands for 100% of Viewport Height */
+            
             background: #2a2a35;
             padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+            box-shadow: none; /* Shadow becomes obsolete on full-screen layout */
+            border-radius: 0; /* Remove rounded corners since it edges the screen */
+            
+            /* Box-sizing ensures padding calculations are done internally */
+            box-sizing: border-box; 
+            
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around; /* Distributes items nicely across full height */
+            align-items: center;
         }
         .weightLoss {
             color: #00e676 !important
@@ -37,7 +58,21 @@
             background: #15151a;
             border-radius: 6px;
             width: 100%;
-            height: 300px;
+            max-width: 900px; /* Prevents the chart from stretching infinitely on wide desktop displays */
+            height: auto;
+            aspect-ratio: 4 / 3;
+        }
+        @media (min-width: 600px) {
+            canvas {
+                /* Wide Landscape aspect ratio for tablet and desktop viewports */
+                aspect-ratio: 2 / 1; 
+            }
+        }
+        @media (max-width: 480px) {
+            #measurement {
+                /* Drop the font size slightly on mobile so the whole line fits */
+                font-size: 1.1rem; 
+            }
         }
         #tooltip {
             position: absolute;
@@ -97,11 +132,11 @@
         const canvas = document.getElementById('chart');
         const ctx = canvas.getContext('2d');
         const MAX_HISTORY_POINTS = 30; // Number of data points visible on screen at once
-        let dataHistory = []; // Stores objects: { time: string, value: float }
-        let balanceData = null;
-        let dataToPush = null; // here because balance data underlying ref can change between the request is send and it's reponse
-        let historyCount = 0;
-        let globActivePoint = null;
+        let _dataHistory = []; // Stores objects: { time: string, value: float }
+        let _balanceData = null;
+        let _dataToPush = null; // here because balance data underlying ref can change between the request is send and it's reponse
+        let _historyCount = 0;
+        let _globActivePoint = null;
 
         // Initialize SSE Connection
         const source = new EventSource('/events');
@@ -119,34 +154,39 @@
 
         function LoadHistory(datas, count)
         {
-            dataHistory = datas.map(element => LoadData(element));
-            historyCount = count;
-            console.log(dataHistory);
+            _dataHistory = datas.map(element => LoadData(element));
+            _historyCount = count;
 
-            for(let i = 1; i < historyCount; ++i)
+            for(let i = 1; i < _historyCount; ++i)
             {
-                dataHistory[i].delta = dataHistory[i].weight - dataHistory[i - 1].weight;
+                _dataHistory[i].delta = _dataHistory[i].weight - _dataHistory[i - 1].weight;
             }
 
             DrawLineChart();
 
-            if(historyCount > 0)
+            if(_historyCount > 0)
             {
-                const deltaMonth = dataHistory[0].weight - dataHistory[historyCount - 1].weight;
+                const deltaMonth = _dataHistory[_historyCount - 1].weight - _dataHistory[0].weight;
                 const color = Math.abs(deltaMonth) >= 1e-1 ? (deltaMonth > 0.0 ? ClassNames.WEIGHT_GAIN : ClassNames.WEIGHT_LOSS) : '';
                 SetValue('vDeltaMonth', Math.round(deltaMonth * 10) * 100, color);
             }
         }
 
-        function GetDateStringPrecise(date)
+        function formatTime(time)
         {
-            return date.getUTCDate() + "-" + (date.getUTCMonth() + 1) + "-" + date.getUTCFullYear() + ":" + date.getUTCHours() + "h" + date.getUTCMinutes() + "m" + date.getUTCSeconds() + "s";
+            return time < 10 ? '0' + time : time;
         }
 
-        function GetDateStringDay(date)
+        function GetDateString(date)
         {
             let year = date.getUTCFullYear();
-            return date.getUTCDate() + "-" + (date.getUTCMonth() + 1) + "-" + String(year - 2000);
+            return formatTime(date.getUTCDate()) + "-" + formatTime(date.getUTCMonth() + 1) + "-" + String(Math.abs(year - 2000));
+        }
+
+        function GetTimeString(date)
+        {
+            let year = date.getUTCFullYear();
+            return formatTime(date.getUTCHours()) + ":" + formatTime(date.getUTCMinutes()) + ":" + formatTime(date.getUTCSeconds());
         }
 
         function SetValue(id, value, colorClass)
@@ -161,28 +201,46 @@
             if(lastHistory != null)
             {
                 const delta = data.weight - lastHistory.weight;
-                data.delta = delta;
+                data.delta = delta;  //dddd
                 const color = Math.abs(delta) >= 1e-1 ? (delta > 0.0 ? ClassNames.WEIGHT_GAIN : ClassNames.WEIGHT_LOSS) : '';
-                SetValue('vDelta', Math.round(delta * 10) * 100, color);
+                let deltaStr = Math.round(delta * 10) * 100;
+                deltaStr = deltaStr > 0 ? '+' + deltaStr : deltaStr; 
+                SetValue('vDelta', deltaStr, color);
             }
 
-            SetValue('vDate', GetDateStringPrecise(data.date), 0);
+            SetValue('vDate', GetDateString(data.date) + " " + GetTimeString(data.date), 0);
             SetValue('vWeight', data.weight.toFixed(1), 0);
 
-            balanceData = data;
+            _balanceData = data;
         }
 
         function DrawLineChart() {
             // Clear canvas canvas
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            if (dataHistory.length === 0) return;
+            if (_dataHistory.length === 0) return;
 
-            const padding = 40;
+            const displayWidth = canvas.clientWidth;
+            const displayHeight = canvas.clientHeight;
+
+            // Synchronize the internal drawing resolution to prevent blurriness or compression
+            if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+                canvas.width = displayWidth;
+                canvas.height = displayHeight;
+            }
+
+            const currentAspectRatio = canvas.width / canvas.height;
+            const isTinyDevice = currentAspectRatio < 1.5;
+            const AbscisseDateCount = isTinyDevice ? 4 : 8;
+
+            // Clear the workspace canvas frame using the newly aligned dimensions
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const padding = isTinyDevice ? 20 : 40;
             const chartWidth = canvas.width - padding * 2;
             const chartHeight = canvas.height - padding * 2;
 
             // Find dynamic min/max bounds for proper scaling
-            let values = dataHistory.map(d => d.weight);
+            let values = _dataHistory.map(d => d.weight);
             let maxVal = Math.max(...values, 90) + 5;
             let minVal = Math.min(...values, 0) - 5;
             if (minVal < 0) minVal = 0; 
@@ -203,7 +261,8 @@
                 ctx.fillStyle = '#8a8a95';
                 ctx.font = '10px Arial';
                 let lbl = (maxVal - (valRange / 4) * i).toFixed(1) + "kg";
-                ctx.fillText(lbl, 5, y + 3);
+                const up =  + isTinyDevice ? (10 * (i == 4 )) : 0;
+                ctx.fillText(lbl, 5, y + 3 - up);
             }
 
             // Draw Chart Line Path
@@ -212,45 +271,59 @@
             ctx.lineWidth = 3;
             ctx.lineJoin = 'round';
 
-            for (let i = 0; i < dataHistory.length; i++) {
-                // Calculate coordinate placements linearly
-                let x = padding + (i / (MAX_HISTORY_POINTS - 1)) * chartWidth;
-                let y = padding + chartHeight - ((dataHistory[i].weight - minVal) / valRange) * chartHeight;
+            const startDate = _dataHistory[0].date;
+            const endDate = _dataHistory[_dataHistory.length - 1].date;
 
-                dataHistory[i].x = x;
-                dataHistory[i].y = y;
+            const startTime = startDate.getTime();
+            const endTime = endDate.getTime();
+            const dateSize = Math.max(endTime - startTime, 1.0) // avoid div by 0
+
+            for (let i = 0; i < _dataHistory.length; i++) 
+            {
+                let currentDate = (_dataHistory[i].date.getTime() - startTime) / dateSize;
+
+                let x = padding + currentDate * chartWidth;
+                let y = padding + chartHeight - ((_dataHistory[i].weight - minVal) / valRange) * chartHeight;
+
+                _dataHistory[i].x = x;
+                _dataHistory[i].y = y;
 
                 if (i === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
             }
             ctx.stroke();
 
-            let date;
-
-            for (let i = 0; i < dataHistory.length; i++) {
-
-                let x = padding + (i / (MAX_HISTORY_POINTS - 1)) * chartWidth;
-                let y = padding + chartHeight - ((dataHistory[i].weight - minVal) / valRange) * chartHeight;
+            for (let i = 0; i < _dataHistory.length; i++) 
+            {
+                let currentDate = (_dataHistory[i].date.getTime() - startTime) / dateSize;
+                
+                let x = padding + currentDate * chartWidth;
+                let y = padding + chartHeight - ((_dataHistory[i].weight - minVal) / valRange) * chartHeight;
 
                 ctx.beginPath();
                 let radius = 4;
-                if(globActivePoint != null && globActivePoint.x == x)
+                if(_globActivePoint != null && _globActivePoint.x == x)
                 {
                     radius = 8;
                 }
                 ctx.fillStyle = '#ff1744';
                 ctx.arc(x, y, radius, 0, 2 * Math.PI);
                 ctx.fill();
+            }
 
-                if (i === 0) {
-                    date = dataHistory[i].date;
-                    ctx.fillStyle = '#8a8a95';
-                    ctx.font = '10px Arial';
-                    ctx.save();
-                    ctx.translate(x, canvas.height - 15);
-                    ctx.fillText(GetDateStringDay(dataHistory[i].date), -20, 0);
-                    ctx.restore();
-                }
+            for(let i = 0; i < AbscisseDateCount; ++i)
+            {
+                let currentDateTime = i / (AbscisseDateCount);
+                let currentDate = new Date(startTime + currentDateTime * dateSize);
+
+                let x = padding + currentDateTime * chartWidth;
+                ctx.fillStyle = '#8a8a95';
+                ctx.font = '10px Arial';
+                ctx.save();
+                ctx.translate(x + 20, canvas.height - 15);
+                ctx.fillText(GetDateString(currentDate), -20, 0);
+                ctx.fillText(GetTimeString(currentDate), -20, 10);
+                ctx.restore();
             }
         }
 
@@ -262,8 +335,8 @@
 
             let activePoint = null;
 
-            for (let i = 0; i < dataHistory.length; i++) {
-                const p = dataHistory[i];
+            for (let i = 0; i < _dataHistory.length; i++) {
+                const p = _dataHistory[i];
                 const distance = Math.pow(mouseX - p.x, 2);
                 if (distance < 100) { // note it's squared distance here
                     activePoint = p;
@@ -273,16 +346,15 @@
 
             if(activePoint != null)
             {
-                console.log(`p.x = ${activePoint.x}, p.y = ${activePoint.y}, value = ${activePoint.weight}, delta = ${activePoint.delta}`);
                 tooltip.innerHTML = `
-                    <div class="tt-title">Date : ${GetDateStringPrecise(activePoint.date)}</div>
+                    <div class="tt-title">Date : ${GetDateString(activePoint.date) + " " + GetTimeString(activePoint.date)}</div>
                     <div>Poids : ${activePoint.weight.toFixed(2)} kg</div>
                     <div>Delta : ${Math.round(activePoint.delta * 10) * 100} g</div>
                 `;
 
-                if(activePoint != globActivePoint)
+                if(activePoint != _globActivePoint)
                 {
-                    globActivePoint = activePoint;
+                    _globActivePoint = activePoint;
                     DrawLineChart();
                 }
 
@@ -296,7 +368,7 @@
 
         canvas.addEventListener('mouseleave', function() {
             tooltip.style.opacity = '0';
-            globActivePoint = null;
+            _globActivePoint = null;
             DrawLineChart();
         });
         
@@ -308,6 +380,7 @@
                 })
                 .then(json => {
                     console.log(`Found history: ${json.count}`);
+                    console.log(json);
                     if (json.data && json.data.length > 0) {
                         LoadHistory(json.data, json.count);
                     }
@@ -329,9 +402,9 @@
                     const data = LoadData(payload);
 
                     let lastData = null;
-                    if(historyCount > 0)
+                    if(_historyCount > 0)
                     {
-                        lastData = dataHistory[historyCount - 1];
+                        lastData = _dataHistory[_historyCount - 1];
                     } 
                     ShowBalanceData(data, lastData);
                 } catch (err) {
@@ -342,37 +415,36 @@
 
         document.getElementById('sendBtn').addEventListener('click', function() {
             console.log("Sending data...");
-            if(balanceData == null) return;
+            if(_balanceData == null) return;
             const button = this;
             button.disabled = true;
             button.textContent = "Sending...";
 
-            dataToPush = { 
-                ...balanceData, 
+            _dataToPush = { 
+                ..._balanceData, 
                 date: new Date() 
             };
 
-            // 3. Envoi de la requête HTTP POST avec fetch
             fetch('/submit-data', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                // On reconstruit l'objet JSON attendu par le serveur
                 body: JSON.stringify({
-                    date: Date.now(),
-                    weight: dataToPush.weight
+                    date: new Date().getTime(),
+                    weight: _dataToPush.weight
                 })
             })
             .then(response => {
                 if (response.ok) {
                     console.log("Successfully sent data");
-                    dataHistory.push({...dataToPush});
-                    historyCount++;
-                    dataToPush = null;
-                    if(historyCount >= MAX_HISTORY_POINTS)
+                    _dataHistory.push({..._dataToPush});
+                    _historyCount++;
+                    _dataToPush = null;
+                    if(_historyCount >= MAX_HISTORY_POINTS)
                     {
-                        dataHistory.shift();
+                        _dataHistory.shift();
+                        console.log("SHIFT");
                     }
                     DrawLineChart();
                 } else {

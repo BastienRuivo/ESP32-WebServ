@@ -5,13 +5,14 @@
 #include <ArduinoJson.h>
 
 #define MAX_HISTORY_COUNT 30
-//#define MOCK_HISTORY_DATA
 #define MOCK_BALANCE_DATA
 
 #include "WeightData.h"
+#include "RingBuffer.h"
 
 const char* ssid     = "UrFatNetwork";
 const char* password = "DuuDuuD38460";
+const char* HISTORY_FILENAME = "/WeightData.json";
 
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
@@ -20,40 +21,150 @@ AsyncEventSource events("/events");
 unsigned long lastTime = 0;
 const unsigned long timerDelay = 100;
 
-WeightData history[MAX_HISTORY_COUNT];
-uint32_t historyCount = 0;
+RingBuffer<WeightData, MAX_HISTORY_COUNT> history;
 
-float getRandomFloat(float min, float max) {
-    return min + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / (max - min)));
+void LoadHistoryFromMemory()
+{
+  history.clear();
+  Serial.println("Loading History.");
+
+  if (!LittleFS.exists(HISTORY_FILENAME)) 
+  {
+    Serial.println("No history file found. Initializing empty file.");
+    File file = LittleFS.open(HISTORY_FILENAME, FILE_WRITE);
+    if (file) 
+    { 
+      file.print("[]"); 
+      file.close(); 
+    }
+    return;
+  }
+
+  if (!LittleFS.exists(HISTORY_FILENAME)) 
+  {
+    Serial.println("No history file");
+    return;
+  }
+
+  File file = LittleFS.open(HISTORY_FILENAME, FILE_READ);
+  if (!file) 
+  {
+    Serial.println("Error opening history file for reading.");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+
+  if (error) 
+  {
+    Serial.printf("Failed to parse JSON backup file: %s\n", error.c_str());
+    return;
+  }
+
+  JsonArray array = doc.as<JsonArray>();
+    
+  size_t size = array.size();
+  Serial.println("History disk size");
+  Serial.println(size);
+
+  for (int i = 0; i < size; ++i)
+  {
+
+    if(size - i >= MAX_HISTORY_COUNT) continue;
+    WeightData data{};
+    data.date = array[i]["date"];
+    data.weight = array[i]["weight"];
+    history.push_back(data);
+
+    Serial.println("\n--- Data from history ---");
+    Serial.printf("Current epoch time: %lld\n", (long long)data.date);
+    Serial.printf("Data weight     : %.2f kg\n", data.weight);
+    Serial.println("----------------------------------------------------\n");
+  }
+
+  Serial.printf("History populated !");
 }
 
-void AddValueToHistory(WeightData value)
+bool UploadDataToMemory(WeightData& data) 
 {
-  if(historyCount < MAX_HISTORY_COUNT)
+  File file = LittleFS.open(HISTORY_FILENAME, "r+"); // Open read write wiuth r+
+  if (!file) 
   {
-    history[historyCount++] = value;
+    Serial.println("Failed to open file for uploading.");
+    return false;
   }
-  else
+
+  size_t fileSize = file.size();
+
+  // Check if the file is completely empty or corrupted
+  if (fileSize < 2) 
   {
-    for(int i = 0; i < MAX_HISTORY_COUNT - 1; ++i)
-    {
-      history[i] = history[i + 1];
-    }
-    history[MAX_HISTORY_COUNT - 1] = value;
+    file.close();
+    file = LittleFS.open(HISTORY_FILENAME, FILE_WRITE);
+    file.print("[]");
+    fileSize = file.size();
   }
+
+  // Move the file write pointer right before the closing bracket ']'
+  file.seek(fileSize - 1, SeekSet);
+
+  // If the file already contains entries, inject a comma separator
+  if (fileSize > 2) 
+  {
+    file.print(",");
+  }
+
+  // Serialize the new point
+  JsonDocument doc;
+  WeightData::Jsonify(data, doc);
+
+  serializeJson(doc, file);
+
+  // Reclose the json array
+  file.print("]");
+  file.close();
+  
+  return true;
+}
+
+void addDataToHistory(WeightData& data) 
+{
+  history.push_back(data);
+  UploadDataToMemory(data);
+}
+
+float getRandomFloat(float min, float max) 
+{
+  return min + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / (max - min)));
 }
 
 void JsonifyHistory(String& output)
 {
   JsonDocument doc;
-  doc["count"] = historyCount;
+  doc["count"] = history.size();
   
   JsonArray dataArray = doc["data"].to<JsonArray>();
-  for (int i = 0; i < historyCount; i++) {
+  for (int i = 0; i < history.size(); i++) {
     JsonObject obj = dataArray.add<JsonObject>();
     WeightData::Jsonify(history[i], obj);
   }
   serializeJson(doc, output);
+}
+
+void SendBalanceData(WeightData data)
+{
+  // if someone is listening
+  if(events.count() > 0) 
+  {  
+    JsonDocument doc;
+    WeightData::Jsonify(data, doc);
+
+    String jsonOutput;
+    serializeJson(doc, jsonOutput);
+    events.send(jsonOutput.c_str(), "sensor-addPoint", data.date);
+  }
 }
 
 void setup() {
@@ -78,6 +189,8 @@ void setup() {
     return;
   }
 
+  LoadHistoryFromMemory();
+
   // By default, the ESP32 AP IP address is 192.168.4.1
   IPAddress IP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
@@ -100,7 +213,12 @@ void setup() {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, data, len);
 
-    if (error) {
+    String output;
+    serializeJson(doc, output);
+    Serial.println(output.c_str());
+
+    if (error) 
+    {
         Serial.print("Échec du parsing JSON du POST : ");
         Serial.println(error.c_str());
         return;
@@ -109,10 +227,10 @@ void setup() {
     WeightData newData{};
     newData.date = doc["date"];
     newData.weight = doc["weight"];
-    AddValueToHistory(newData);
+    addDataToHistory(newData);
 
     Serial.println("\n--- Data received from balance ---");
-    Serial.printf("Data time Epoch (ms) : %llu\n", newData.date);
+    Serial.printf("Current epoch time: %lld\n", (long long)newData.date);
     Serial.printf("Data weight     : %.2f kg\n", newData.weight);
     Serial.println("----------------------------------------------------\n");
     });
@@ -124,43 +242,6 @@ void setup() {
   server.begin();
 
   Serial.println("HTTP server started.");
-
-  
-  float delta = getRandomFloat(-5.0f, 5.0f);
-  float newWeight = std::min(std::max(history[historyCount - 1].weight + delta, 40.0f), 120.0f);
-
-#ifdef MOCK_HISTORY_DATA
-  WeightData data{};
-  data.date = millis();
-  data.weight = newWeight;
-  AddValueToHistory(data);
-
-  for(uint32_t i = 1; i < MAX_HISTORY_COUNT; ++i)
-  {
-    float delta = getRandomFloat(-5.0f, 5.0f);
-    float newWeight = std::min(std::max(history[historyCount - 1].weight + delta, 40.0f), 120.0f);
-
-    WeightData data{};
-    data.date = millis();
-    data.weight = newWeight;
-    AddValueToHistory(data);
-  }
-#endif
-}
-
-void SendBalanceData(WeightData data)
-{
-  // if someone is listening
-  if(events.count() > 0) 
-  {  
-    JsonDocument doc;
-    WeightData::Jsonify(data, doc);
-
-    String jsonOutput;
-    serializeJson(doc, jsonOutput);
-    events.send(jsonOutput.c_str(), "sensor-addPoint", data.date);
-    Serial.println("Sending json : " + jsonOutput);
-  }
 }
 
 void loop() 
