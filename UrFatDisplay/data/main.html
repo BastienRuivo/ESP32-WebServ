@@ -90,7 +90,7 @@
         }
         .tt-title { color: #8a8a95; font-size: 0.75rem; margin-bottom: 4px; }
         .tt-text { color: #aaaaca; font-weight: bold; }
-        .btn {
+        .CaptureBtn {
             background-color: #0033ff;
             color: #fff;
             border: none;
@@ -101,10 +101,27 @@
             cursor: pointer;
             transition: background-color 0.2s, transform 0.1s;
         }
-        .btn:hover {
+        .CaptureBtn:hover {
             background-color: #0091ea;
         }
-        .btn:active {
+        .CaptureBtn:active {
+            transform: scale(0.98);
+        }
+        .DbBtn {
+            background-color: #34953e;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            font-size: 1rem;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .DbBtn:hover {
+            background-color: #60c96a;
+        }
+        .DbBtn:active {
             transform: scale(0.98);
         }
     </style>
@@ -113,7 +130,7 @@
 
     <div class="container">
         <div style="margin-bottom: 20px;">
-            <button id="sendBtn" class="btn">Capture</button>
+            <button id="sendBtn" class="CaptureBtn">Capture</button> <button id="dbBtn" class="DbBtn">History</button>
         </div>
         <div id="measurement">
             <p><span id="vDate">--:--:--</span></p>
@@ -400,6 +417,7 @@
                 try {
                     const payload = JSON.parse(e.data);
                     const data = LoadData(payload);
+                    data.date = new Date();
 
                     let lastData = null;
                     if(_historyCount > 0)
@@ -421,8 +439,7 @@
             button.textContent = "Sending...";
 
             _dataToPush = { 
-                ..._balanceData, 
-                date: new Date() 
+                ..._balanceData
             };
 
             fetch('/submit-data', {
@@ -431,7 +448,7 @@
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    date: new Date().getTime(),
+                    date: _dataToPush.date.getTime(),
                     weight: _dataToPush.weight
                 })
             })
@@ -459,6 +476,14 @@
                 button.disabled = false;
                 button.textContent = "Capture";
             });
+        });
+        document.getElementById('dbBtn').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.href = '/download-history';
+            link.download = 'WeightData.json';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
         });
 
     </script>

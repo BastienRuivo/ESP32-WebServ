@@ -235,6 +235,20 @@ void setup() {
     Serial.println("----------------------------------------------------\n");
     });
 
+  // download history DB
+  server.on("/download-history", HTTP_GET, [](AsyncWebServerRequest *request)
+  {
+    if (LittleFS.exists("/WeightData.json")) 
+    {
+      // "application/octet-stream" forces the browser to download the file instead of displaying it
+      request->send(LittleFS, "/WeightData.json", "application/octet-stream");
+    } 
+    else 
+    {
+      request->send(404, "text/plain", "Error: /WeightData.json not found on filesystem.");
+    }
+  });
+
   // Attach the handler
   server.addHandler(&events);
 
